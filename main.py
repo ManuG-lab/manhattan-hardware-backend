@@ -216,3 +216,109 @@ def sell_product(product_id: str, sale: Sale):
     return {"message": "Sale recorded"}
 
 
+@app.put("/products/{product_id}")
+def update_product(product_id: str, product: Product):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Ensure product exists
+    existing = cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not existing:
+        conn.close()
+        return {"error": "Product not found"}
+
+    cursor.execute(
+        """
+        UPDATE products
+        SET name = ?, category = ?, price = ?, image = ?, date_received = ?, stock_received = ?, expiry_date = ?
+        WHERE id = ?
+        """,
+        (
+            product.name,
+            product.category,
+            product.price,
+            product.image,
+            product.dateReceived,
+            product.stockReceived,
+            product.expiryDate,
+            product_id,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"message": "Product updated"}
+
+
+@app.delete("/products/{product_id}")
+def delete_product(product_id: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # delete related sales first
+    cursor.execute("DELETE FROM sales WHERE product_id = ?", (product_id,))
+    cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Product deleted"}
+
+
+@app.put("/sales/{sale_id}")
+def update_sale(sale_id: str, sale: Sale):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # ensure sale exists
+    existing_sale = cursor.execute("SELECT product_id, quantity_sold FROM sales WHERE id = ?", (sale_id,)).fetchone()
+    if not existing_sale:
+        conn.close()
+        return {"error": "Sale not found"}
+
+    product_id = existing_sale[0]
+    old_quantity = existing_sale[1]
+
+    # Get product stock_received
+    product = cursor.execute(
+        "SELECT stock_received FROM products WHERE id = ?",
+        (product_id,),
+    ).fetchone()
+    if not product:
+        conn.close()
+        return {"error": "Product not found"}
+
+    # Get total sold excluding this sale
+    total_sold_result = cursor.execute(
+        "SELECT SUM(quantity_sold) FROM sales WHERE product_id = ? AND id != ?",
+        (product_id, sale_id),
+    ).fetchone()
+    total_sold = total_sold_result[0] if total_sold_result and total_sold_result[0] else 0
+
+    current_stock = product[0] - total_sold
+    if sale.quantitySold > current_stock:
+        conn.close()
+        return {"error": "Insufficient stock"}
+
+    # perform update
+    cursor.execute(
+        """
+        UPDATE sales
+        SET product_id = ?, date_sold = ?, quantity_sold = ?, price = ?
+        WHERE id = ?
+        """,
+        (sale.productId or product_id, sale.dateSold, sale.quantitySold, sale.price, sale_id),
+    )
+
+    conn.commit()
+    conn.close()
+    return {"message": "Sale updated"}
+
+
+@app.delete("/sales/{sale_id}")
+def delete_sale(sale_id: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
+    conn.commit()
+    conn.close()
+    return {"message": "Sale deleted"}
+
+
