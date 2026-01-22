@@ -1,7 +1,23 @@
 import sqlite3
+import os
 
 
-DB_NAME = "inventory.db"
+# For local development, use current directory
+# For production (Render), use persistent disk if available
+if os.environ.get('RENDER'):
+    # Render environment - try to use persistent disk
+    disk_path = os.environ.get('RENDER_DISK_PATH')
+    if disk_path:
+        DB_DIR = disk_path
+    else:
+        # Fallback - but this will be ephemeral on Render free tier
+        DB_DIR = '/tmp'
+        print("WARNING: Using ephemeral storage. Data will be lost on restart!")
+else:
+    # Local development
+    DB_DIR = os.getcwd()
+
+DB_NAME = os.path.join(DB_DIR, "inventory.db")
 
 
 def get_connection():

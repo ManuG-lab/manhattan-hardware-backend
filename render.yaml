@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: manhattan-hardware-backend
+    runtime: python3
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: RENDER
+        value: true
+    # Note: Free tier doesn't support persistent disks
+    # For production, consider upgrading to paid tier or using PostgreSQL
