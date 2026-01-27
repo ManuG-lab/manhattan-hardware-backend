@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 import sqlite3
-from database import create_tables
+from database import create_tables, get_connection
 import uuid
 from fastapi.middleware.cors import CORSMiddleware
-
+from datetime import datetime, timedelta
 
 # =============================
 # DATA MODELS
@@ -14,34 +14,36 @@ class Product(BaseModel):
     id: str | None = None
     name: str
     category: str
-    price: float
-    image: str
+    image: str | None = None
     dateReceived: str | None = None
-    stockReceived: int
     expiryDate: str | None = None
+
+
+class ProductVariant(BaseModel):
+    id: str | None = None
+    productId: str
+    size: str
+    price: float
+    stockReceived: int
+
 
 class Sale(BaseModel):
     id: str | None = None
-    productId: str
+    variantId: str
     dateSold: str | None = None
     quantitySold: int
     price: float
 
 
 # =============================
-# 5. API ENDPOINTS
+# APP SETUP
 # =============================
-
-def get_connection():
-    conn = sqlite3.connect("inventory.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,201 +51,56 @@ app.add_middleware(
 
 create_tables()
 
+# =============================
+# PRODUCTS
+# =============================
+
 @app.get("/products")
 def get_products():
     conn = get_connection()
-    products = conn.execute("SELECT * FROM products").fetchall()
+    rows = conn.execute("SELECT * FROM products").fetchall()
     conn.close()
-    return [
-        {
-            "id": p["id"],
-            "name": p["name"],
-            "category": p["category"],
-            "price": p["price"],
-            "image": p["image"],
-            "dateReceived": p["date_received"],
-            "stockReceived": p["stock_received"],
-            "expiryDate": p["expiry_date"]
-        }
-        for p in products
-    ]
-
-
-@app.get("/sales")
-def get_sales():
-    conn = get_connection()
-    sales = conn.execute("SELECT * FROM sales").fetchall()
-    conn.close()
-    return [
-        {
-            "id": s["id"],
-            "productId": s["product_id"],
-            "dateSold": s["date_sold"],
-            "quantitySold": s["quantity_sold"],
-            "price": s["price"]
-        }
-        for s in sales
-    ]
-
-
-@app.post("/sales")
-def add_sale(sale: Sale):
-    if not sale.id:
-        sale.id = uuid.uuid4().hex[:4]
-    if not sale.dateSold:
-        from datetime import datetime
-        sale.dateSold = datetime.now().strftime("%Y-%m-%d")
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Get product stock_received
-    product = cursor.execute(
-        "SELECT stock_received FROM products WHERE id = ?",
-        (sale.productId,),
-    ).fetchone()
-
-    if not product:
-        conn.close()
-        return {"error": "Product not found"}
-
-    # Get total quantity sold so far
-    total_sold_result = cursor.execute(
-        "SELECT SUM(quantity_sold) FROM sales WHERE product_id = ?",
-        (sale.productId,),
-    ).fetchone()
-    total_sold = total_sold_result[0] if total_sold_result and total_sold_result[0] else 0
-
-    current_stock = product[0] - total_sold
-
-    if sale.quantitySold > current_stock:
-        conn.close()
-        return {"error": "Insufficient stock"}
-
-    # Insert sale
-    cursor.execute(
-        """
-        INSERT INTO sales (id, product_id, date_sold, quantity_sold, price)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (sale.id, sale.productId, sale.dateSold, sale.quantitySold, sale.price),
-    )
-
-    conn.commit()
-    conn.close()
-    return {"message": "Sale recorded"}
+    return [dict(row) for row in rows]
 
 
 @app.post("/products")
 def add_product(product: Product):
-    if not product.id:
-        product.id = uuid.uuid4().hex[:4]
-    if not product.dateReceived:
-        from datetime import datetime
-        product.dateReceived = datetime.now().strftime("%Y-%m-%d")
-    if not product.expiryDate:
-        from datetime import datetime, timedelta
-        product.expiryDate = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
-    
+    product.id = product.id or uuid.uuid4().hex[:6]
+    product.dateReceived = product.dateReceived or datetime.now().strftime("%Y-%m-%d")
+    product.expiryDate = product.expiryDate or (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+
     conn = get_connection()
-    conn.execute(
-        """
-        INSERT INTO products (id, name, category, price, image, date_received, stock_received, expiry_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            product.id,
-            product.name,
-            product.category,
-            product.price,
-            product.image,
-            product.dateReceived,
-            product.stockReceived,
-            product.expiryDate,
-        ),
-    )
+    conn.execute("""
+        INSERT INTO products (id, name, category, image, date_received, expiry_date)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        product.id,
+        product.name,
+        product.category,
+        product.image,
+        product.dateReceived,
+        product.expiryDate
+    ))
     conn.commit()
     conn.close()
-    return {"message": "Product added"}
-
-
-@app.put("/products/{product_id}/sell")
-def sell_product(product_id: str, sale: Sale):
-    if not sale.id:
-        sale.id = uuid.uuid4().hex[:4]
-    if not sale.dateSold:
-        from datetime import datetime
-        sale.dateSold = datetime.now().strftime("%Y-%m-%d")
-    sale.productId = product_id
-    
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    # Get product stock_received
-    product = cursor.execute(
-        "SELECT stock_received FROM products WHERE id = ?",
-        (product_id,),
-    ).fetchone()
-
-    if not product:
-        conn.close()
-        return {"error": "Product not found"}
-
-    # Get total quantity sold so far
-    total_sold_result = cursor.execute(
-        "SELECT SUM(quantity_sold) FROM sales WHERE product_id = ?",
-        (product_id,),
-    ).fetchone()
-    total_sold = total_sold_result[0] if total_sold_result and total_sold_result[0] else 0
-
-    current_stock = product[0] - total_sold
-
-    if sale.quantitySold > current_stock:
-        conn.close()
-        return {"error": "Insufficient stock"}
-
-    # Insert sale
-    cursor.execute(
-        """
-        INSERT INTO sales (id, product_id, date_sold, quantity_sold, price)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (sale.id, product_id, sale.dateSold, sale.quantitySold, sale.price),
-    )
-
-    conn.commit()
-    conn.close()
-    return {"message": "Sale recorded"}
+    return {"message": "Product added", "id": product.id}
 
 
 @app.put("/products/{product_id}")
 def update_product(product_id: str, product: Product):
     conn = get_connection()
-    cursor = conn.cursor()
-
-    # Ensure product exists
-    existing = cursor.execute("SELECT id FROM products WHERE id = ?", (product_id,)).fetchone()
-    if not existing:
-        conn.close()
-        return {"error": "Product not found"}
-
-    cursor.execute(
-        """
+    conn.execute("""
         UPDATE products
-        SET name = ?, category = ?, price = ?, image = ?, date_received = ?, stock_received = ?, expiry_date = ?
-        WHERE id = ?
-        """,
-        (
-            product.name,
-            product.category,
-            product.price,
-            product.image,
-            product.dateReceived,
-            product.stockReceived,
-            product.expiryDate,
-            product_id,
-        ),
-    )
+        SET name=?, category=?, image=?, date_received=?, expiry_date=?
+        WHERE id=?
+    """, (
+        product.name,
+        product.category,
+        product.image,
+        product.dateReceived,
+        product.expiryDate,
+        product_id
+    ))
     conn.commit()
     conn.close()
     return {"message": "Product updated"}
@@ -252,73 +109,97 @@ def update_product(product_id: str, product: Product):
 @app.delete("/products/{product_id}")
 def delete_product(product_id: str):
     conn = get_connection()
-    cursor = conn.cursor()
-
-    # delete related sales first
-    cursor.execute("DELETE FROM sales WHERE product_id = ?", (product_id,))
-    cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.execute("DELETE FROM sales WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id=?)", (product_id,))
+    conn.execute("DELETE FROM product_variants WHERE product_id=?", (product_id,))
+    conn.execute("DELETE FROM products WHERE id=?", (product_id,))
     conn.commit()
     conn.close()
     return {"message": "Product deleted"}
 
+# =============================
+# VARIANTS (SIZES)
+# =============================
 
-@app.put("/sales/{sale_id}")
-def update_sale(sale_id: str, sale: Sale):
+@app.get("/products/{product_id}/variants")
+def get_variants(product_id: str):
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM product_variants WHERE product_id=?",
+        (product_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/variants")
+def add_variant(variant: ProductVariant):
+    variant.id = variant.id or uuid.uuid4().hex[:6]
+
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO product_variants (id, product_id, size, price, stock_received)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        variant.id,
+        variant.productId,
+        variant.size,
+        variant.price,
+        variant.stockReceived
+    ))
+    conn.commit()
+    conn.close()
+    return {"message": "Variant added", "id": variant.id}
+
+
+# =============================
+# SALES
+# =============================
+
+@app.get("/sales")
+def get_sales():
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM sales").fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.post("/sales")
+def add_sale(sale: Sale):
+    sale.id = sale.id or uuid.uuid4().hex[:6]
+    sale.dateSold = sale.dateSold or datetime.now().strftime("%Y-%m-%d")
+
     conn = get_connection()
     cursor = conn.cursor()
 
-    # ensure sale exists
-    existing_sale = cursor.execute("SELECT product_id, quantity_sold FROM sales WHERE id = ?", (sale_id,)).fetchone()
-    if not existing_sale:
-        conn.close()
-        return {"error": "Sale not found"}
-
-    product_id = existing_sale[0]
-    old_quantity = existing_sale[1]
-
-    # Get product stock_received
-    product = cursor.execute(
-        "SELECT stock_received FROM products WHERE id = ?",
-        (product_id,),
+    variant = cursor.execute(
+        "SELECT stock_received FROM product_variants WHERE id=?",
+        (sale.variantId,)
     ).fetchone()
-    if not product:
-        conn.close()
-        return {"error": "Product not found"}
 
-    # Get total sold excluding this sale
-    total_sold_result = cursor.execute(
-        "SELECT SUM(quantity_sold) FROM sales WHERE product_id = ? AND id != ?",
-        (product_id, sale_id),
-    ).fetchone()
-    total_sold = total_sold_result[0] if total_sold_result and total_sold_result[0] else 0
+    if not variant:
+        return {"error": "Variant not found"}
 
-    current_stock = product[0] - total_sold
+    total_sold = cursor.execute(
+        "SELECT SUM(quantity_sold) FROM sales WHERE variant_id=?",
+        (sale.variantId,)
+    ).fetchone()[0] or 0
+
+    current_stock = variant["stock_received"] - total_sold
+
     if sale.quantitySold > current_stock:
-        conn.close()
         return {"error": "Insufficient stock"}
 
-    # perform update
-    cursor.execute(
-        """
-        UPDATE sales
-        SET product_id = ?, date_sold = ?, quantity_sold = ?, price = ?
-        WHERE id = ?
-        """,
-        (sale.productId or product_id, sale.dateSold, sale.quantitySold, sale.price, sale_id),
-    )
+    cursor.execute("""
+        INSERT INTO sales (id, variant_id, date_sold, quantity_sold, price)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        sale.id,
+        sale.variantId,
+        sale.dateSold,
+        sale.quantitySold,
+        sale.price
+    ))
 
     conn.commit()
     conn.close()
-    return {"message": "Sale updated"}
-
-
-@app.delete("/sales/{sale_id}")
-def delete_sale(sale_id: str):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
-    conn.commit()
-    conn.close()
-    return {"message": "Sale deleted"}
-
-
+    return {"message": "Sale recorded"}
