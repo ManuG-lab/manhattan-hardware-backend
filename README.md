@@ -20,6 +20,21 @@ uvicorn main:app --reload
 
 The application uses SQLite for data storage. Locally, data persists between restarts. However, on Render's free tier, the file system is ephemeral.
 
+## Database
+
+The application stores its SQLite database in a persistent location by default. Current DB file and schema snapshot are available in the repository at `db_info.txt`.
+
+- DB file path: `/home/emmanuel-gitau/.bussines_data/inventory.db`
+- To change the DB location, set the `DB_PATH` environment variable to an absolute path (file or directory).
+
+You can inspect the live DB yourself with:
+
+```bash
+sqlite3 /home/emmanuel-gitau/.bussines_data/inventory.db 
+.tables
+.schema products
+PRAGMA table_info(products);
+```
 ### Backup/Restore Database
 
 ```bash

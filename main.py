@@ -4,9 +4,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, validator
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS
+from pydantic import BaseModel, validator, ValidationError
 
 from database import create_tables, get_connection
 
@@ -84,15 +84,8 @@ class SellRequest(BaseModel):
 # APP SETUP
 # =============================
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 create_tables()
 
@@ -102,34 +95,43 @@ create_tables()
 
 def error_response(status_code: int, message: str):
     """Create standardized error response"""
-    return {"error": message}
+    return make_response(jsonify({"error": message}), status_code)
 
 # =============================
 # PRODUCTS
 # =============================
 
-@app.get("/products")
-def get_products(
-    skip: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum records to return")
-):
+@app.route('/products', methods=['GET'])
+def get_products():
     """Get all products with optional pagination"""
     try:
+        try:
+            skip = int(request.args.get('skip', 0))
+            limit = int(request.args.get('limit', 100))
+        except ValueError:
+            return error_response(400, 'Invalid pagination parameters')
+
         conn = get_connection()
         rows = conn.execute(
             "SELECT * FROM products ORDER BY date_received DESC LIMIT ? OFFSET ?",
             (limit, skip)
         ).fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        return jsonify([dict(row) for row in rows])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.post("/products")
-def add_product(product: Product):
+@app.route('/products', methods=['POST'])
+def add_product():
     """Add a new product"""
     try:
+        payload = request.get_json() or {}
+        try:
+            product = Product.model_validate(payload)
+        except ValidationError as ve:
+            return error_response(400, str(ve))
+
         product.id = product.id or uuid.uuid4().hex[:6]
         product.dateReceived = product.dateReceived or datetime.now().strftime("%Y-%m-%d")
         product.expiryDate = product.expiryDate or (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
@@ -148,17 +150,23 @@ def add_product(product: Product):
         ))
         conn.commit()
         conn.close()
-        return {"message": "Product added", "id": product.id}
+        return jsonify({"message": "Product added", "id": product.id})
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Product with this ID already exists")
+        return error_response(400, "Product with this ID already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.put("/products/{product_id}")
-def update_product(product_id: str, product: Product):
+@app.route('/products/<product_id>', methods=['PUT'])
+def update_product(product_id: str):
     """Update an existing product"""
     try:
+        payload = request.get_json() or {}
+        try:
+            product = Product.model_validate(payload)
+        except ValidationError as ve:
+            return error_response(400, str(ve))
+
         conn = get_connection()
         conn.execute("""
             UPDATE products
@@ -174,21 +182,19 @@ def update_product(product_id: str, product: Product):
         ))
         conn.commit()
         
-        # Check if product was actually updated
+        # Check if product exists
         cursor = conn.execute("SELECT id FROM products WHERE id=?", (product_id,))
         if not cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=404, detail="Product not found")
+            return error_response(404, "Product not found")
         
         conn.close()
-        return {"message": "Product updated"}
-    except HTTPException:
-        raise
+        return jsonify({"message": "Product updated"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.delete("/products/{product_id}")
+@app.route('/products/<product_id>', methods=['DELETE'])
 def delete_product(product_id: str):
     """Delete a product and all its variants and sales"""
     try:
@@ -198,7 +204,7 @@ def delete_product(product_id: str):
         cursor = conn.execute("SELECT id FROM products WHERE id=?", (product_id,))
         if not cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=404, detail="Product not found")
+            return error_response(404, "Product not found")
         
         # Delete related sales first (due to foreign key)
         conn.execute("DELETE FROM sales WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id=?)", (product_id,))
@@ -208,12 +214,12 @@ def delete_product(product_id: str):
         conn.execute("DELETE FROM products WHERE id=?", (product_id,))
         conn.commit()
         conn.close()
-        return {"message": "Product deleted"}
+        return jsonify({"message": "Product deleted"})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.get("/products/{product_id}/variants")
+@app.route('/products/<product_id>/variants', methods=['GET'])
 def get_variants(product_id: str):
     """Get all variants for a product"""
     try:
@@ -223,34 +229,38 @@ def get_variants(product_id: str):
         cursor = conn.execute("SELECT id FROM products WHERE id=?", (product_id,))
         if not cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=404, detail="Product not found")
+            return error_response(404, "Product not found")
         
         rows = conn.execute(
             "SELECT * FROM product_variants WHERE product_id=?",
             (product_id,)
         ).fetchall()
         conn.close()
-        return [dict(row) for row in rows]
-    except HTTPException:
-        raise
+        return jsonify([dict(row) for row in rows])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
 # =============================
 # VARIANTS (SIZES)
 # =============================
 
-@app.post("/variants")
-def add_variant(variant: ProductVariant):
+@app.route('/variants', methods=['POST'])
+def add_variant():
     """Add a new product variant"""
     try:
+        payload = request.get_json() or {}
+        try:
+            variant = ProductVariant.model_validate(payload)
+        except ValidationError as ve:
+            return error_response(400, str(ve))
+
         # Validate product exists
         conn = get_connection()
         cursor = conn.execute("SELECT id FROM products WHERE id=?", (variant.productId,))
         if not cursor.fetchone():
             conn.close()
-            raise HTTPException(status_code=404, detail="Product not found")
+            return error_response(404, "Product not found")
         
         variant.id = variant.id or uuid.uuid4().hex[:6]
 
@@ -266,41 +276,48 @@ def add_variant(variant: ProductVariant):
         ))
         conn.commit()
         conn.close()
-        return {"message": "Variant added", "id": variant.id}
+        return jsonify({"message": "Variant added", "id": variant.id})
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Variant with this ID already exists")
-    except HTTPException:
-        raise
+        return error_response(400, "Variant with this ID already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
 # =============================
 # SALES
 # =============================
 
-@app.get("/sales")
-def get_sales(
-    skip: int = Query(0, ge=0, description="Number of records to skip"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum records to return")
-):
+@app.route('/sales', methods=['GET'])
+def get_sales():
     """Get all sales with optional pagination"""
     try:
+        try:
+            skip = int(request.args.get('skip', 0))
+            limit = int(request.args.get('limit', 100))
+        except ValueError:
+            return error_response(400, 'Invalid pagination parameters')
+
         conn = get_connection()
         rows = conn.execute(
             "SELECT * FROM sales ORDER BY date_sold DESC LIMIT ? OFFSET ?",
             (limit, skip)
         ).fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        return jsonify([dict(row) for row in rows])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.post("/sales")
-def add_sale(sale: Sale):
+@app.route('/sales', methods=['POST'])
+def add_sale():
     """Record a new sale and update stock"""
     try:
+        payload = request.get_json() or {}
+        try:
+            sale = Sale.model_validate(payload)
+        except ValidationError as ve:
+            return error_response(400, str(ve))
+
         sale.id = sale.id or uuid.uuid4().hex[:6]
         sale.dateSold = sale.dateSold or datetime.now().strftime("%Y-%m-%d")
 
@@ -316,7 +333,7 @@ def add_sale(sale: Sale):
 
         if not variant:
             conn.close()
-            raise HTTPException(status_code=404, detail="Variant not found")
+            return error_response(404, "Variant not found")
 
         # Calculate available stock
         total_sold = cursor.execute(
@@ -328,7 +345,7 @@ def add_sale(sale: Sale):
 
         if sale.quantitySold > current_stock:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"Insufficient stock. Available: {current_stock}")
+            return error_response(400, f"Insufficient stock. Available: {current_stock}")
 
         # Record the sale
         cursor.execute("""
@@ -344,17 +361,21 @@ def add_sale(sale: Sale):
 
         conn.commit()
         conn.close()
-        return {"message": "Sale recorded", "id": sale.id}
-    except HTTPException:
-        raise
+        return jsonify({"message": "Sale recorded", "id": sale.id})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
 
 
-@app.put("/products/{product_id}/sell")
-def sell_product(product_id: str, sell_request: SellRequest):
+@app.route('/products/<product_id>/sell', methods=['PUT'])
+def sell_product(product_id: str):
     """Alternative endpoint to record a sale by product ID"""
     try:
+        payload = request.get_json() or {}
+        try:
+            sell_request = SellRequest.model_validate(payload)
+        except ValidationError as ve:
+            return error_response(400, str(ve))
+
         # Find the variant for this product
         conn = get_connection()
         cursor = conn.cursor()
@@ -367,7 +388,7 @@ def sell_product(product_id: str, sell_request: SellRequest):
         
         if not variant:
             conn.close()
-            raise HTTPException(status_code=404, detail="No variant found for this product")
+            return error_response(404, "No variant found for this product")
         
         variant_id = variant["id"]
         
@@ -381,7 +402,7 @@ def sell_product(product_id: str, sell_request: SellRequest):
         
         if sell_request.quantitySold > current_stock:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"Insufficient stock. Available: {current_stock}")
+            return error_response(400, f"Insufficient stock. Available: {current_stock}")
         
         # Create sale
         sale_id = uuid.uuid4().hex[:6]
@@ -398,9 +419,13 @@ def sell_product(product_id: str, sell_request: SellRequest):
         
         conn.commit()
         conn.close()
-        return {"message": "Sale recorded", "id": sale_id}
-    except HTTPException:
-        raise
+        return jsonify({"message": "Sale recorded", "id": sale_id})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        return error_response(500, f"Database error: {str(e)}")
+if __name__ == '__main__':
+    # Ensure tables exist before starting
+    create_tables()
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
+
 
