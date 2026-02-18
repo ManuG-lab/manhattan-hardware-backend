@@ -422,6 +422,142 @@ def sell_product(product_id: str):
         return jsonify({"message": "Sale recorded", "id": sale_id})
     except Exception as e:
         return error_response(500, f"Database error: {str(e)}")
+
+
+# =============================
+# HELPER FUNCTIONS (Additional)
+# =============================
+
+def is_number(x):
+    """Check if value can be converted to float"""
+    try:
+        if x is None:
+            return False
+        float(x)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+# =============================
+# EXCEL IMPORT
+# =============================
+
+@app.route('/api/import-excel', methods=['POST'])
+def import_excel():
+    """Import products from Excel file"""
+    import pandas as pd
+    from io import BytesIO
+    
+    try:
+        if 'file' not in request.files:
+            return error_response(400, 'No file provided')
+        
+        file = request.files['file']
+        if file.filename == '':
+            return error_response(400, 'No file selected')
+        
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            return error_response(400, 'Invalid file format. Please upload .xlsx or .xls file')
+        
+        # Read Excel file
+        try:
+            data = file.read()
+            df = pd.read_excel(BytesIO(data))
+        except Exception as e:
+            return error_response(400, f'Failed to read Excel file: {str(e)}')
+        
+        # Validate DataFrame
+        if df.empty:
+            return error_response(400, 'Excel file is empty')
+        
+        # Check required columns
+        required_columns = ['Product', 'Category']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return error_response(400, f'Missing required columns: {", ".join(missing_columns)}')
+        
+        conn = get_connection()
+        cursor = conn.cursor()
+        
+        imported_count = 0
+        errors = []
+        
+        for idx, row in df.iterrows():
+            try:
+                # Extract and clean data
+                product_name = str(row.get('Product', '')).strip()
+                category = str(row.get('Category', '')).strip()
+                size = str(row.get('Size', 'N/A')).strip() if 'Size' in row else 'N/A'
+                price = row.get('Price') if 'Price' in row else None
+                image = str(row.get('Image', '')).strip() if 'Image' in row else None
+                
+                # Validate required fields
+                if not product_name:
+                    errors.append(f"Row {idx + 2}: Product name is required")
+                    continue
+                
+                if not category:
+                    errors.append(f"Row {idx + 2}: Category is required")
+                    continue
+                
+                # Validate and convert price
+                if price is None or not is_number(price):
+                    errors.append(f"Row {idx + 2}: Invalid price '{price}'")
+                    continue
+                
+                try:
+                    price = float(price)
+                except (ValueError, TypeError):
+                    errors.append(f"Row {idx + 2}: Invalid price '{price}'")
+                    continue
+                
+                if price < 0:
+                    errors.append(f"Row {idx + 2}: Price cannot be negative")
+                    continue
+                
+                # Create product
+                product_id = uuid.uuid4().hex[:8]
+                date_received = datetime.now().strftime("%Y-%m-%d")
+                expiry_date = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+                
+                cursor.execute("""
+                    INSERT INTO products (id, name, category, image, date_received, expiry_date)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (product_id, product_name, category, image, date_received, expiry_date))
+                
+                # Create variant with size and price
+                variant_id = uuid.uuid4().hex[:8]
+                stock_received = 1
+                
+                cursor.execute("""
+                    INSERT INTO product_variants (id, product_id, size, price, stock_received)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (variant_id, product_id, size, price, stock_received))
+                
+                imported_count += 1
+                
+            except sqlite3.IntegrityError as e:
+                errors.append(f"Row {idx + 2}: Database integrity error - {str(e)}")
+                continue
+            except Exception as e:
+                errors.append(f"Row {idx + 2}: {str(e)}")
+                continue
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "success": True,
+            "imported": imported_count,
+            "total_rows": len(df),
+            "errors": errors
+        })
+    
+    except Exception as e:
+        return error_response(500, f"Import error: {str(e)}")
+
+
 if __name__ == '__main__':
     # Ensure tables exist before starting
     create_tables()
